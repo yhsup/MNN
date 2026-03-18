@@ -1,7 +1,19 @@
 name: android
+
 on:
-  workflow_dispatch: 
-  
+  # 手动触发，带构建选项
+  workflow_dispatch:
+    inputs:
+      build_target:
+        description: '选择要构建的版本'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - arm64-v8a
+          - armeabi-v7a
+
   push:
     branches:
      - master
@@ -32,15 +44,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
       - name: build_android_64
+        if: github.event.inputs.build_target == 'arm64-v8a' || github.event.inputs.build_target == 'both' || github.event_name != 'workflow_dispatch'
         run: |
             cd project/android
-            mkdir build_64
+            mkdir -p build_64
             cd build_64
             ../build_64.sh -DMNN_LOW_MEMORY=true -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true -DMNN_BUILD_LLM=true -DMNN_SUPPORT_TRANSFORMER_FUSE=true -DLLM_SUPPORT_VISION=true -DMNN_BUILD_OPENCV=true -DMNN_IMGCODECS=true -DLLM_SUPPORT_AUDIO=true -DMNN_BUILD_AUDIO=true -DMNN_SUPPORT_BF16=ON
+
       - name: build_android_32
+        if: github.event.inputs.build_target == 'armeabi-v7a' || github.event.inputs.build_target == 'both' || github.event.name != 'workflow_dispatch'
         run: |
             cd project/android
-            mkdir build_32
+            mkdir -p build_32
             cd build_32
             ../build_32.sh -DMNN_LOW_MEMORY=true -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true -DMNN_BUILD_LLM=true -DMNN_SUPPORT_TRANSFORMER_FUSE=true -DLLM_SUPPORT_AUDIO=true -DMNN_BUILD_AUDIO=true -DLLM_SUPPORT_VISION=true -DMNN_BUILD_OPENCV=true -DMNN_IMGCODECS=true
