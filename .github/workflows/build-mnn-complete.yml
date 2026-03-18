@@ -398,6 +398,57 @@ jobs:
           echo "=== SO files for APK ==="
           find libs -name "*.so" -exec ls -lh {} \;
 
+      - name: Fix AndroidManifest.xml
+        run: |
+          cd project/android/demo/app/src/main
+          
+          if [ -f "AndroidManifest.xml" ]; then
+            echo "Fixing AndroidManifest.xml for android:exported..."
+            
+            # 使用 Python 脚本修复
+            python3 << 'EOF'
+import re
+
+with open('AndroidManifest.xml', 'r') as f:
+    content = f.read()
+
+# 为所有 activity 添加 android:exported
+# 有 intent-filter 的设为 true，否则设为 false
+
+# 找到所有 activity 块
+activity_pattern = r'(<activity[^>]*>)(.*?)(</activity>)'
+
+def fix_activity(match):
+    start_tag = match.group(1)
+    body = match.group(2)
+    end_tag = match.group(3)
+    
+    # 检查是否已有 exported 属性
+    if 'android:exported' in start_tag:
+        return match.group(0)
+    
+    # 检查是否有 intent-filter
+    has_intent = '<intent-filter>' in body
+    exported_value = 'true' if has_intent else 'false'
+    
+    # 在 > 之前添加属性
+    if start_tag.endswith('>'):
+        start_tag = start_tag[:-1] + f' android:exported="{exported_value}">'
+    
+    return start_tag + body + end_tag
+
+content = re.sub(activity_pattern, fix_activity, content, flags=re.DOTALL)
+
+with open('AndroidManifest.xml', 'w') as f:
+    f.write(content)
+
+print("Fixed!")
+EOF
+            
+            echo "=== Fixed AndroidManifest.xml ==="
+            cat AndroidManifest.xml
+          fi
+
       - name: Create build.gradle for APK
         run: |
           cd project/android/demo/app
