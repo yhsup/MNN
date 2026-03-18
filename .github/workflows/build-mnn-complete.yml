@@ -1,0 +1,718 @@
+name: Build MNN and APK
+
+on:
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      # ========== SO 编译选项 ==========
+      build_type:
+        description: '构建类型'
+        required: false
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - Debug
+      min_sdk_version:
+        description: '最低 SDK 版本'
+        required: false
+        default: '21'
+        type: string
+      enable_opencl:
+        description: '启用 OpenCL GPU 加速'
+        required: false
+        default: true
+        type: boolean
+      enable_vulkan:
+        description: '启用 Vulkan 后端'
+        required: false
+        default: true
+        type: boolean
+      enable_opengl:
+        description: '启用 OpenGL 后端'
+        required: false
+        default: true
+        type: boolean
+      enable_opencv:
+        description: '启用 OpenCV 图像处理'
+        required: false
+        default: true
+        type: boolean
+      enable_audio:
+        description: '启用 Audio 音频处理'
+        required: false
+        default: true
+        type: boolean
+      enable_llm:
+        description: '启用 LLM 大模型支持'
+        required: false
+        default: true
+        type: boolean
+      enable_nnapi:
+        description: '启用 NNAPI 后端'
+        required: false
+        default: false
+        type: boolean
+      build_arm64:
+        description: '编译 arm64-v8a'
+        required: false
+        default: true
+        type: boolean
+      build_arm32:
+        description: '编译 armeabi-v7a'
+        required: false
+        default: true
+        type: boolean
+      build_x86:
+        description: '编译 x86'
+        required: false
+        default: false
+        type: boolean
+      build_x86_64:
+        description: '编译 x86_64'
+        required: false
+        default: false
+        type: boolean
+      
+      # ========== APK 构建选项 ==========
+      apk_variant:
+        description: 'APK 架构版本'
+        required: false
+        default: 'universal'
+        type: choice
+        options:
+          - universal      # 通用版（包含所有架构）
+          - arm64          # 64位版（仅 arm64-v8a）
+          - arm32          # 32位版（仅 armeabi-v7a）
+          - arm-all        # ARM 全架构（arm64 + arm32）
+          - x86            # x86 模拟器版
+          - x86_64         # x86_64 模拟器版
+      sign_apk:
+        description: '签名 APK（需要配置 secrets）'
+        required: false
+        default: false
+        type: boolean
+
+
+env:
+  NDK_VERSION: 'r26d'
+
+jobs:
+  # ========================================
+  # Job 1: 准备构建矩阵
+  # ========================================
+  prepare:
+    name: Prepare Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      build_type: ${{ steps.set-params.outputs.build_type }}
+      min_sdk_version: ${{ steps.set-params.outputs.min_sdk_version }}
+      enable_opencl: ${{ steps.set-params.outputs.enable_opencl }}
+      enable_vulkan: ${{ steps.set-params.outputs.enable_vulkan }}
+      enable_opengl: ${{ steps.set-params.outputs.enable_opengl }}
+      enable_opencv: ${{ steps.set-params.outputs.enable_opencv }}
+      enable_audio: ${{ steps.set-params.outputs.enable_audio }}
+      enable_llm: ${{ steps.set-params.outputs.enable_llm }}
+      enable_nnapi: ${{ steps.set-params.outputs.enable_nnapi }}
+      apk_variant: ${{ steps.set-params.outputs.apk_variant }}
+      sign_apk: ${{ steps.set-params.outputs.sign_apk }}
+    
+    steps:
+      - name: Set build parameters
+        id: set-params
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "build_type=${{ inputs.build_type }}" >> $GITHUB_OUTPUT
+            echo "min_sdk_version=${{ inputs.min_sdk_version }}" >> $GITHUB_OUTPUT
+            echo "enable_opencl=${{ inputs.enable_opencl }}" >> $GITHUB_OUTPUT
+            echo "enable_vulkan=${{ inputs.enable_vulkan }}" >> $GITHUB_OUTPUT
+            echo "enable_opengl=${{ inputs.enable_opengl }}" >> $GITHUB_OUTPUT
+            echo "enable_opencv=${{ inputs.enable_opencv }}" >> $GITHUB_OUTPUT
+            echo "enable_audio=${{ inputs.enable_audio }}" >> $GITHUB_OUTPUT
+            echo "enable_llm=${{ inputs.enable_llm }}" >> $GITHUB_OUTPUT
+            echo "enable_nnapi=${{ inputs.enable_nnapi }}" >> $GITHUB_OUTPUT
+            echo "apk_variant=${{ inputs.apk_variant }}" >> $GITHUB_OUTPUT
+            echo "sign_apk=${{ inputs.sign_apk }}" >> $GITHUB_OUTPUT
+          else
+            echo "build_type=Release" >> $GITHUB_OUTPUT
+            echo "min_sdk_version=21" >> $GITHUB_OUTPUT
+            echo "enable_opencl=true" >> $GITHUB_OUTPUT
+            echo "enable_vulkan=true" >> $GITHUB_OUTPUT
+            echo "enable_opengl=true" >> $GITHUB_OUTPUT
+            echo "enable_opencv=true" >> $GITHUB_OUTPUT
+            echo "enable_audio=true" >> $GITHUB_OUTPUT
+            echo "enable_llm=true" >> $GITHUB_OUTPUT
+            echo "enable_nnapi=false" >> $GITHUB_OUTPUT
+            echo "apk_variant=universal" >> $GITHUB_OUTPUT
+            echo "sign_apk=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set build matrix
+        id: set-matrix
+        run: |
+          # 构建矩阵 JSON
+          MATRIX_ITEMS=""
+          
+          # 根据输入决定编译哪些架构
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            if [ "${{ inputs.build_arm64 }}" == "true" ]; then
+              [ -n "$MATRIX_ITEMS" ] && MATRIX_ITEMS+=","
+              MATRIX_ITEMS+='{"arch":"arm64-v8a","arm82":"ON"}'
+            fi
+            if [ "${{ inputs.build_arm32 }}" == "true" ]; then
+              [ -n "$MATRIX_ITEMS" ] && MATRIX_ITEMS+=","
+              MATRIX_ITEMS+='{"arch":"armeabi-v7a","arm82":"OFF"}'
+            fi
+            if [ "${{ inputs.build_x86 }}" == "true" ]; then
+              [ -n "$MATRIX_ITEMS" ] && MATRIX_ITEMS+=","
+              MATRIX_ITEMS+='{"arch":"x86","arm82":"OFF"}'
+            fi
+            if [ "${{ inputs.build_x86_64 }}" == "true" ]; then
+              [ -n "$MATRIX_ITEMS" ] && MATRIX_ITEMS+=","
+              MATRIX_ITEMS+='{"arch":"x86_64","arm82":"OFF"}'
+            fi
+          else
+            # 自动触发时默认编译 arm64 和 arm32
+            MATRIX_ITEMS='{"arch":"arm64-v8a","arm82":"ON"},{"arch":"armeabi-v7a","arm82":"OFF"}'
+          fi
+          
+          # 如果没有选择任何架构，默认编译 arm64
+          if [ -z "$MATRIX_ITEMS" ]; then
+            MATRIX_ITEMS='{"arch":"arm64-v8a","arm82":"ON"}'
+          fi
+          
+          MATRIX="{\"include\":[$MATRIX_ITEMS]}"
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "Generated matrix: $MATRIX"
+
+  # ========================================
+  # Job 2: 编译 MNN so 库
+  # ========================================
+  build-so:
+    name: Build SO (${{ matrix.arch }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    
+    steps:
+      - name: Checkout MNN repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+
+      - name: Set environment
+        run: |
+          echo "ANDROID_NDK=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git
+
+      - name: Build MNN for ${{ matrix.arch }}
+        run: |
+          ARCH="${{ matrix.arch }}"
+          ABI="${ARCH}"
+          ARM82="${{ matrix.arm82 }}"
+          API_LEVEL="android-${{ needs.prepare.outputs.min_sdk_version }}"
+          
+          echo "=========================================="
+          echo "Building MNN for $ABI"
+          echo "API Level: $API_LEVEL, ARM82: $ARM82"
+          echo "=========================================="
+          
+          mkdir -p build_${ABI}
+          cd build_${ABI}
+          
+          # 构建额外参数
+          EXTRA_ARGS=""
+          [ "${{ needs.prepare.outputs.enable_opencl }}" == "true" ] && EXTRA_ARGS="$EXTRA_ARGS -DMNN_OPENCL=ON"
+          [ "${{ needs.prepare.outputs.enable_vulkan }}" == "true" ] && EXTRA_ARGS="$EXTRA_ARGS -DMNN_VULKAN=ON"
+          [ "${{ needs.prepare.outputs.enable_opengl }}" == "true" ] && EXTRA_ARGS="$EXTRA_ARGS -DMNN_OPENGL=ON"
+          [ "${{ needs.prepare.outputs.enable_opencv }}" == "true" ] && EXTRA_ARGS="$EXTRA_ARGS -DMNN_BUILD_OPENCV=ON -DMNN_IMGCODECS=ON"
+          [ "${{ needs.prepare.outputs.enable_audio }}" == "true" ] && EXTRA_ARGS="$EXTRA_ARGS -DMNN_BUILD_AUDIO=ON"
+          [ "${{ needs.prepare.outputs.enable_llm }}" == "true" ] && EXTRA_ARGS="$EXTRA_ARGS -DMNN_BUILD_LLM=ON -DMNN_LOW_MEMORY=ON -DMNN_SUPPORT_TRANSFORMER_FUSE=ON"
+          [ "${{ needs.prepare.outputs.enable_nnapi }}" == "true" ] && EXTRA_ARGS="$EXTRA_ARGS -DMNN_NNAPI=ON"
+          
+          # 执行 CMake 配置
+          cmake ../ \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+            -DCMAKE_BUILD_TYPE=${{ needs.prepare.outputs.build_type }} \
+            -DANDROID_ABI="${ABI}" \
+            -DANDROID_STL=c++_static \
+            -DANDROID_NATIVE_API_LEVEL=${API_LEVEL} \
+            -DMNN_USE_LOGCAT=false \
+            -DMNN_USE_SSE=OFF \
+            -DMNN_BUILD_TEST=OFF \
+            -DMNN_BUILD_BENCHMARK=OFF \
+            -DMNN_ARM82=${ARM82} \
+            -DMNN_BUILD_FOR_ANDROID_COMMAND=true \
+            -DMNN_BUILD_SHARED_LIBS=ON \
+            -DMNN_BUILD_TRAIN=OFF \
+            -DMNN_BUILD_DEMO=OFF \
+            -DMNN_BUILD_TOOLS=OFF \
+            -DMNN_BUILD_QUANTOOLS=OFF \
+            -DMNN_EVALUATION=OFF \
+            -DMNN_BUILD_CONVERTER=OFF \
+            -DNATIVE_LIBRARY_OUTPUT=. \
+            -DNATIVE_INCLUDE_OUTPUT=. \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            ${EXTRA_ARGS}
+          
+          make -j$(nproc)
+          
+          # 收集产物
+          mkdir -p ../so_artifacts/${ABI}
+          find . -name "*.so" -exec cp -v {} ../so_artifacts/${ABI}/ \;
+          
+          # 收集头文件
+          mkdir -p ../so_artifacts/include
+          [ -d "../include" ] && cp -rv ../include/* ../so_artifacts/include/ 2>/dev/null || true
+          [ -d "../source/include" ] && cp -rv ../source/include/* ../so_artifacts/include/ 2>/dev/null || true
+          
+          echo "=== Generated SO files ==="
+          find ../so_artifacts -name "*.so" -exec ls -lh {} \;
+
+      - name: Upload SO artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnn-so-${{ matrix.arch }}
+          path: so_artifacts/
+          retention-days: 1
+
+  # ========================================
+  # Job 3: 构建 APK
+  # ========================================
+  build-apk:
+    name: Build APK
+    needs: [prepare, build-so]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout MNN repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Download all SO artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: so_artifacts
+          pattern: mnn-so-*
+          merge-multiple: false
+
+      - name: Prepare SO files for APK
+        run: |
+          cd project/android/demo/app
+          
+          # 创建 libs 目录
+          mkdir -p libs
+          
+          APK_VARIANT="${{ needs.prepare.outputs.apk_variant }}"
+          echo "APK Variant: $APK_VARIANT"
+          
+          # 根据 APK 变体选择架构
+          case $APK_VARIANT in
+            universal)
+              # 通用版：包含所有架构
+              for dir in ../../../so_artifacts/mnn-so-*/; do
+                if [ -d "$dir" ]; then
+                  for ABI in arm64-v8a armeabi-v7a x86 x86_64; do
+                    if [ -d "${dir}${ABI}" ]; then
+                      mkdir -p "libs/${ABI}"
+                      cp -rv "${dir}${ABI}"/*.so "libs/${ABI}/" 2>/dev/null || true
+                    fi
+                  done
+                fi
+              done
+              ;;
+            arm64)
+              # 64位版
+              mkdir -p libs/arm64-v8a
+              for dir in ../../../so_artifacts/mnn-so-arm64-v8a/; do
+                if [ -d "${dir}arm64-v8a" ]; then
+                  cp -rv "${dir}arm64-v8a"/*.so libs/arm64-v8a/ 2>/dev/null || true
+                fi
+              done
+              ;;
+            arm32)
+              # 32位版
+              mkdir -p libs/armeabi-v7a
+              for dir in ../../../so_artifacts/mnn-so-armeabi-v7a/; do
+                if [ -d "${dir}armeabi-v7a" ]; then
+                  cp -rv "${dir}armeabi-v7a"/*.so libs/armeabi-v7a/ 2>/dev/null || true
+                fi
+              done
+              ;;
+            arm-all)
+              # ARM 全架构
+              mkdir -p libs/arm64-v8a libs/armeabi-v7a
+              for dir in ../../../so_artifacts/mnn-so-arm64-v8a/; do
+                if [ -d "${dir}arm64-v8a" ]; then
+                  cp -rv "${dir}arm64-v8a"/*.so libs/arm64-v8a/ 2>/dev/null || true
+                fi
+              done
+              for dir in ../../../so_artifacts/mnn-so-armeabi-v7a/; do
+                if [ -d "${dir}armeabi-v7a" ]; then
+                  cp -rv "${dir}armeabi-v7a"/*.so libs/armeabi-v7a/ 2>/dev/null || true
+                fi
+              done
+              ;;
+            x86)
+              mkdir -p libs/x86
+              for dir in ../../../so_artifacts/mnn-so-x86/; do
+                if [ -d "${dir}x86" ]; then
+                  cp -rv "${dir}x86"/*.so libs/x86/ 2>/dev/null || true
+                fi
+              done
+              ;;
+            x86_64)
+              mkdir -p libs/x86_64
+              for dir in ../../../so_artifacts/mnn-so-x86_64/; do
+                if [ -d "${dir}x86_64" ]; then
+                  cp -rv "${dir}x86_64"/*.so libs/x86_64/ 2>/dev/null || true
+                fi
+              done
+              ;;
+          esac
+          
+          echo "=== SO files for APK ==="
+          find libs -name "*.so" -exec ls -lh {} \;
+
+      - name: Create build.gradle for APK
+        run: |
+          cd project/android/demo/app
+          
+          APK_VARIANT="${{ needs.prepare.outputs.apk_variant }}"
+          
+          # 根据变体设置 abiFilters
+          case $APK_VARIANT in
+            universal) ABI_FILTERS="'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'" ;;
+            arm64) ABI_FILTERS="'arm64-v8a'" ;;
+            arm32) ABI_FILTERS="'armeabi-v7a'" ;;
+            arm-all) ABI_FILTERS="'armeabi-v7a', 'arm64-v8a'" ;;
+            x86) ABI_FILTERS="'x86'" ;;
+            x86_64) ABI_FILTERS="'x86_64'" ;;
+            *) ABI_FILTERS="'armeabi-v7a', 'arm64-v8a'" ;;
+          esac
+          
+          cat > build.gradle << GRADLE_EOF
+          apply plugin: 'com.android.application'
+
+          android {
+              compileSdkVersion 34
+              defaultConfig {
+                  applicationId "com.taobao.android.mnndemo"
+                  minSdkVersion ${{ needs.prepare.outputs.min_sdk_version }}
+                  targetSdkVersion 34
+                  versionCode 1
+                  versionName "1.0"
+                  testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+                  
+                  ndk {
+                      abiFilters $ABI_FILTERS
+                  }
+              }
+              
+              buildTypes {
+                  debug {
+                  }
+                  release {
+                      minifyEnabled false
+                      proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+                  }
+              }
+              
+              sourceSets {
+                  main {
+                      jniLibs.srcDirs = ['libs']
+                      assets.srcDirs = ["../../../../demo/model", "../../../../resource/model"]
+                  }
+              }
+              
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              
+              namespace 'com.taobao.android.mnndemo'
+          }
+
+          dependencies {
+              implementation fileTree(dir: 'libs', include: ['*.jar'])
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+              implementation 'com.google.android.material:material:1.11.0'
+              androidTestImplementation 'androidx.test:runner:1.5.2'
+              androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
+          }
+          GRADLE_EOF
+          
+          echo "=== app/build.gradle ==="
+          cat build.gradle
+
+      - name: Create project build.gradle
+        run: |
+          cd project/android/demo
+          
+          cat > build.gradle << 'GRADLE_EOF'
+          // Top-level build file
+
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:8.2.2'
+              }
+          }
+
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          task clean(type: Delete) {
+              delete rootProject.buildDir
+          }
+          GRADLE_EOF
+
+      - name: Update gradle.properties
+        run: |
+          cd project/android/demo
+          
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.enableJetifier=true
+          android.nonTransitiveRClass=true
+          EOF
+
+      - name: Update gradle wrapper
+        run: |
+          cd project/android/demo
+          
+          mkdir -p gradle/wrapper
+          cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.5-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+
+      - name: Grant execute permission
+        run: chmod +x project/android/demo/gradlew
+
+      - name: Build APK
+        run: |
+          cd project/android/demo
+          
+          BUILD_TYPE="${{ needs.prepare.outputs.build_type }}"
+          echo "Building $BUILD_TYPE APK..."
+          
+          if [ "$BUILD_TYPE" = "Debug" ]; then
+            ./gradlew assembleDebug --no-daemon --stacktrace
+          else
+            ./gradlew assembleRelease --no-daemon --stacktrace
+          fi
+
+      - name: Collect APK
+        id: collect
+        run: |
+          mkdir -p output
+          BUILD_TYPE="${{ needs.prepare.outputs.build_type }}"
+          APK_VARIANT="${{ needs.prepare.outputs.apk_variant }}"
+          
+          if [ "$BUILD_TYPE" = "Debug" ]; then
+            APK_PATH="project/android/demo/app/build/outputs/apk/debug"
+          else
+            APK_PATH="project/android/demo/app/build/outputs/apk/release"
+          fi
+          
+          if [ -d "$APK_PATH" ]; then
+            for APK in $APK_PATH/*.apk; do
+              if [ -f "$APK" ]; then
+                # 重命名 APK，包含变体信息
+                APK_NAME="mnn-demo-${APK_VARIANT}-$(basename $APK)"
+                cp "$APK" "output/$APK_NAME"
+              fi
+            done
+          fi
+          
+          echo "=== Generated APKs ==="
+          ls -lh output/
+          
+          # 设置输出
+          APK_FILE=$(ls output/*.apk 2>/dev/null | head -n 1)
+          if [ -n "$APK_FILE" ]; then
+            APK_NAME=$(basename "$APK_FILE")
+            echo "apk_name=$APK_NAME" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Sign APK
+        if: needs.prepare.outputs.sign_apk == 'true'
+        env:
+          SIGNING_KEY_BASE64: ${{ secrets.SIGNING_KEY_BASE64 }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+        run: |
+          if [ -z "$SIGNING_KEY_BASE64" ]; then
+            echo "Warning: Signing secrets not configured, skipping signing"
+            exit 0
+          fi
+          
+          echo "Signing APK..."
+          echo "$SIGNING_KEY_BASE64" | base64 -d > keystore.jks
+          
+          ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}
+          BUILD_TOOLS="$ANDROID_SDK_ROOT/build-tools"
+          LATEST_BUILD_TOOL=$(ls $BUILD_TOOLS | sort -V | tail -1)
+          BUILD_TOOLS_PATH="$BUILD_TOOLS/$LATEST_BUILD_TOOL"
+          
+          for APK in output/*.apk; do
+            if [ -f "$APK" ]; then
+              "$BUILD_TOOLS_PATH/zipalign" -v -p 4 "$APK" "${APK}-aligned.apk"
+              "$BUILD_TOOLS_PATH/apksigner" sign \
+                --ks keystore.jks \
+                --ks-key-alias "$SIGNING_KEY_ALIAS" \
+                --ks-pass "pass:$SIGNING_STORE_PASSWORD" \
+                --key-pass "pass:$SIGNING_KEY_PASSWORD" \
+                --out "${APK}-signed.apk" \
+                "${APK}-aligned.apk"
+              mv "${APK}-signed.apk" "$APK"
+              rm -f "${APK}-aligned.apk"
+              "$BUILD_TOOLS_PATH/apksigner" verify "$APK"
+            fi
+          done
+          
+          rm -f keystore.jks
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnn-demo-${{ needs.prepare.outputs.apk_variant }}-${{ needs.prepare.outputs.build_type }}-${{ github.run_number }}
+          path: output/*.apk
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ github.run_number }}
+          name: MNN Demo ${{ github.run_number }} (${{ needs.prepare.outputs.apk_variant }})
+          body: |
+            ## Build Information
+            
+            - **Build Date**: ${{ github.event.head_commit.timestamp }}
+            - **Commit**: ${{ github.sha }}
+            - **Build Type**: ${{ needs.prepare.outputs.build_type }}
+            - **APK Variant**: ${{ needs.prepare.outputs.apk_variant }}
+            - **Min SDK**: ${{ needs.prepare.outputs.min_sdk_version }}
+            
+            ### Features
+            - OpenCL: ${{ needs.prepare.outputs.enable_opencl }}
+            - Vulkan: ${{ needs.prepare.outputs.enable_vulkan }}
+            - OpenGL: ${{ needs.prepare.outputs.enable_opengl }}
+            - OpenCV: ${{ needs.prepare.outputs.enable_opencv }}
+            - Audio: ${{ needs.prepare.outputs.enable_audio }}
+            - LLM: ${{ needs.prepare.outputs.enable_llm }}
+            - NNAPI: ${{ needs.prepare.outputs.enable_nnapi }}
+            
+            ### Changes
+            ${{ github.event.head_commit.message }}
+          files: output/*.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ========================================
+  # Job 4: 上传 SO 文件（可选）
+  # ========================================
+  upload-so:
+    name: Upload SO Files
+    needs: [prepare, build-so]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Download all SO artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all_so
+          pattern: mnn-so-*
+          merge-multiple: false
+
+      - name: Combine SO files
+        run: |
+          mkdir -p so_output/libs
+          
+          # 合并所有架构
+          for dir in all_so/mnn-so-*/; do
+            if [ -d "$dir" ]; then
+              for ABI in arm64-v8a armeabi-v7a x86 x86_64; do
+                if [ -d "${dir}${ABI}" ]; then
+                  mkdir -p "so_output/libs/${ABI}"
+                  cp -rv "${dir}${ABI}"/*.so "so_output/libs/${ABI}/" 2>/dev/null || true
+                fi
+              done
+              # 复制头文件
+              if [ -d "${dir}include" ]; then
+                mkdir -p so_output/include
+                cp -rv ${dir}include/* so_output/include/ 2>/dev/null || true
+              fi
+            fi
+          done
+          
+          # 创建信息文件
+          cat > so_output/BUILD_INFO.txt << EOF
+          MNN Android Library Build
+          =========================
+          Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          Git Commit: ${{ github.sha }}
+          Build Type: ${{ needs.prepare.outputs.build_type }}
+          Min SDK: ${{ needs.prepare.outputs.min_sdk_version }}
+          
+          Features:
+          - OpenCL: ${{ needs.prepare.outputs.enable_opencl }}
+          - Vulkan: ${{ needs.prepare.outputs.enable_vulkan }}
+          - OpenGL: ${{ needs.prepare.outputs.enable_opengl }}
+          - OpenCV: ${{ needs.prepare.outputs.enable_opencv }}
+          - Audio: ${{ needs.prepare.outputs.enable_audio }}
+          - LLM: ${{ needs.prepare.outputs.enable_llm }}
+          - NNAPI: ${{ needs.prepare.outputs.enable_nnapi }}
+          EOF
+          
+          echo "=== SO files ==="
+          find so_output -name "*.so" -exec ls -lh {} \;
+
+      - name: Upload SO artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnn-so-all-${{ needs.prepare.outputs.build_type }}-${{ github.run_number }}
+          path: so_output/
+          retention-days: 30
