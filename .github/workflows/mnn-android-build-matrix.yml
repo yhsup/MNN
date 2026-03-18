@@ -1,0 +1,335 @@
+name: Build MNN Android (Matrix)
+
+on:
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      architectures:
+        description: '编译架构（多个架构用逗号分隔）'
+        required: false
+        default: 'arm64-v8a,armeabi-v7a'
+        type: string
+      build_type:
+        description: '构建类型'
+        required: false
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - Debug
+      min_sdk_version:
+        description: '最低 SDK 版本'
+        required: false
+        default: '21'
+        type: string
+      enable_opencl:
+        description: '启用 OpenCL GPU 加速'
+        required: false
+        default: true
+        type: boolean
+      enable_vulkan:
+        description: '启用 Vulkan 后端'
+        required: false
+        default: true
+        type: boolean
+      enable_opengl:
+        description: '启用 OpenGL 后端'
+        required: false
+        default: true
+        type: boolean
+      enable_opencv:
+        description: '启用 OpenCV 图像处理'
+        required: false
+        default: true
+        type: boolean
+      enable_audio:
+        description: '启用 Audio 音频处理'
+        required: false
+        default: true
+        type: boolean
+      enable_llm:
+        description: '启用 LLM 大模型支持'
+        required: false
+        default: true
+        type: boolean
+      enable_nnapi:
+        description: '启用 NNAPI 后端'
+        required: false
+        default: false
+        type: boolean
+
+  push:
+    branches:
+      - main
+      - master
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+env:
+  NDK_VERSION: 'r26d'
+
+jobs:
+  # 准备阶段：解析参数并设置矩阵
+  prepare:
+    name: Prepare Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      build_type: ${{ steps.set-params.outputs.build_type }}
+      min_sdk_version: ${{ steps.set-params.outputs.min_sdk_version }}
+      enable_opencl: ${{ steps.set-params.outputs.enable_opencl }}
+      enable_vulkan: ${{ steps.set-params.outputs.enable_vulkan }}
+      enable_opengl: ${{ steps.set-params.outputs.enable_opengl }}
+      enable_opencv: ${{ steps.set-params.outputs.enable_opencv }}
+      enable_audio: ${{ steps.set-params.outputs.enable_audio }}
+      enable_llm: ${{ steps.set-params.outputs.enable_llm }}
+      enable_nnapi: ${{ steps.set-params.outputs.enable_nnapi }}
+    
+    steps:
+      - name: Set build parameters
+        id: set-params
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "build_type=${{ inputs.build_type }}" >> $GITHUB_OUTPUT
+            echo "min_sdk_version=${{ inputs.min_sdk_version }}" >> $GITHUB_OUTPUT
+            echo "enable_opencl=${{ inputs.enable_opencl }}" >> $GITHUB_OUTPUT
+            echo "enable_vulkan=${{ inputs.enable_vulkan }}" >> $GITHUB_OUTPUT
+            echo "enable_opengl=${{ inputs.enable_opengl }}" >> $GITHUB_OUTPUT
+            echo "enable_opencv=${{ inputs.enable_opencv }}" >> $GITHUB_OUTPUT
+            echo "enable_audio=${{ inputs.enable_audio }}" >> $GITHUB_OUTPUT
+            echo "enable_llm=${{ inputs.enable_llm }}" >> $GITHUB_OUTPUT
+            echo "enable_nnapi=${{ inputs.enable_nnapi }}" >> $GITHUB_OUTPUT
+            ARCHS="${{ inputs.architectures }}"
+          else
+            echo "build_type=Release" >> $GITHUB_OUTPUT
+            echo "min_sdk_version=21" >> $GITHUB_OUTPUT
+            echo "enable_opencl=true" >> $GITHUB_OUTPUT
+            echo "enable_vulkan=true" >> $GITHUB_OUTPUT
+            echo "enable_opengl=true" >> $GITHUB_OUTPUT
+            echo "enable_opencv=true" >> $GITHUB_OUTPUT
+            echo "enable_audio=true" >> $GITHUB_OUTPUT
+            echo "enable_llm=true" >> $GITHUB_OUTPUT
+            echo "enable_nnapi=false" >> $GITHUB_OUTPUT
+            ARCHS="arm64-v8a,armeabi-v7a"
+          fi
+          
+          # 将架构列表转换为 JSON 数组格式
+          ARCHS_JSON=$(echo "$ARCHS" | tr ',' '\n' | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "archs_json=$ARCHS_JSON" >> $GITHUB_OUTPUT
+
+      - name: Set matrix
+        id: set-matrix
+        run: |
+          echo 'matrix={"include":[]}' > matrix.json
+          
+          # 读取架构列表
+          IFS=',' read -ra ARCHS <<< "${{ steps.set-params.outputs.archs_json || 'arm64-v8a,armeabi-v7a' }}"
+          
+          # 如果是从 workflow_dispatch 触发，使用输入的架构
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            ARCHS_INPUT="${{ inputs.architectures }}"
+            IFS=',' read -ra ARCHS <<< "$ARCHS_INPUT"
+          fi
+          
+          # 构建 JSON 矩阵
+          MATRIX='{"include":['
+          FIRST=true
+          for ARCH in "${ARCHS[@]}"; do
+            ARCH=$(echo "$ARCH" | tr -d ' ')
+            if [ -n "$ARCH" ]; then
+              if [ "$FIRST" = true ]; then
+                FIRST=false
+              else
+                MATRIX+=','
+              fi
+              MATRIX+="{\"arch\":\"$ARCH\"}"
+            fi
+          done
+          MATRIX+=']}'
+          
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "Matrix: $MATRIX"
+
+  # 编译阶段：并行编译各架构
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+
+      - name: Setup CMake
+        uses: lukka/get-cmake@latest
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: Set environment
+        run: |
+          echo "ANDROID_NDK=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
+
+      - name: Generate MNN Schema
+        run: |
+          if [ -f "./schema/generate.sh" ]; then
+            chmod +x ./schema/generate.sh
+            cd schema && ./generate.sh || true
+            cd ..
+          fi
+
+      - name: Build MNN for ${{ matrix.arch }}
+        run: |
+          ARCH="${{ matrix.arch }}"
+          
+          # 设置 ABI
+          case $ARCH in
+            arm64-v8a) ABI="arm64-v8a" ;;
+            armeabi-v7a) ABI="armeabi-v7a" ;;
+            x86) ABI="x86" ;;
+            x86_64) ABI="x86_64" ;;
+            *) ABI="$ARCH" ;;
+          esac
+          
+          echo "Building for $ABI..."
+          
+          mkdir -p build_${ABI}
+          cd build_${ABI}
+          
+          # 构建 CMake 参数
+          CMAKE_ARGS=(
+            -GNinja
+            -DCMAKE_BUILD_TYPE=${{ needs.prepare.outputs.build_type }}
+            -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake
+            -DANDROID_ABI=${ABI}
+            -DANDROID_PLATFORM=android-${{ needs.prepare.outputs.min_sdk_version }}
+            -DANDROID_STL=c++_shared
+            -DMNN_BUILD_SHARED_LIBS=ON
+            -DMNN_BUILD_FOR_ANDROID_COMMAND=ON
+            -DMNN_USE_LOGCAT=ON
+            -DMNN_JNI=ON
+            -DMNN_ARM82=ON
+            -DMNN_SEP_BUILD=OFF
+            -DMNN_BUILD_TRAIN=OFF
+            -DMNN_BUILD_DEMO=OFF
+            -DMNN_BUILD_TOOLS=OFF
+            -DMNN_BUILD_QUANTOOLS=OFF
+            -DMNN_EVALUATION=OFF
+            -DMNN_BUILD_CONVERTER=OFF
+            -DMNN_BUILD_TEST=OFF
+          )
+          
+          # 添加可选功能
+          [ "${{ needs.prepare.outputs.enable_opencl }}" == "true" ] && CMAKE_ARGS+=(-DMNN_OPENCL=ON)
+          [ "${{ needs.prepare.outputs.enable_vulkan }}" == "true" ] && CMAKE_ARGS+=(-DMNN_VULKAN=ON)
+          [ "${{ needs.prepare.outputs.enable_opengl }}" == "true" ] && CMAKE_ARGS+=(-DMNN_OPENGL=ON)
+          [ "${{ needs.prepare.outputs.enable_opencv }}" == "true" ] && CMAKE_ARGS+=(-DMNN_BUILD_OPENCV=ON -DMNN_IMGCODECS=ON)
+          [ "${{ needs.prepare.outputs.enable_audio }}" == "true" ] && CMAKE_ARGS+=(-DMNN_BUILD_AUDIO=ON)
+          [ "${{ needs.prepare.outputs.enable_llm }}" == "true" ] && CMAKE_ARGS+=(-DMNN_BUILD_LLM=ON -DMNN_LOW_MEMORY=ON)
+          [ "${{ needs.prepare.outputs.enable_nnapi }}" == "true" ] && CMAKE_ARGS+=(-DMNN_NNAPI=ON)
+          
+          cmake .. "${CMAKE_ARGS[@]}"
+          cmake --build . -j$(nproc)
+          
+          # 收集产物
+          mkdir -p ../artifacts/${ABI}
+          find . -name "*.so" -exec cp -v {} ../artifacts/${ABI}/ \;
+          
+          # 收集头文件
+          mkdir -p ../artifacts/include
+          [ -d "../include" ] && cp -rv ../include/* ../artifacts/include/ 2>/dev/null || true
+          [ -d "../source/include" ] && cp -rv ../source/include/* ../artifacts/include/ 2>/dev/null || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnn-${{ matrix.arch }}
+          path: artifacts/
+          retention-days: 7
+
+  # 合并阶段：合并所有架构的产物
+  combine:
+    name: Combine Artifacts
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all_artifacts
+          pattern: mnn-*
+          merge-multiple: false
+
+      - name: Combine libraries
+        run: |
+          mkdir -p output/libs
+          
+          # 合并所有架构的 so 文件
+          for dir in all_artifacts/mnn-*/; do
+            if [ -d "$dir" ]; then
+              ARCH=$(basename "$dir" | sed 's/mnn-//')
+              if [ -d "${dir}${ARCH}" ]; then
+                cp -rv "${dir}${ARCH}" output/libs/ 2>/dev/null || true
+              else
+                mkdir -p "output/libs/${ARCH}"
+                cp -rv ${dir}*.so "output/libs/${ARCH}/" 2>/dev/null || true
+              fi
+            fi
+          done
+          
+          # 复制头文件
+          for dir in all_artifacts/mnn-*/; do
+            if [ -d "${dir}include" ]; then
+              mkdir -p output/include
+              cp -rv ${dir}include/* output/include/ 2>/dev/null || true
+              break
+            fi
+          done
+          
+          # 创建构建信息
+          cat > output/BUILD_INFO.txt << EOF
+          MNN Android Library Build
+          =========================
+          Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          Git Commit: ${{ github.sha }}
+          Git Ref: ${{ github.ref }}
+          Build Type: ${{ needs.prepare.outputs.build_type }}
+          Min SDK: ${{ needs.prepare.outputs.min_sdk_version }}
+          
+          Features:
+          - OpenCL: ${{ needs.prepare.outputs.enable_opencl }}
+          - Vulkan: ${{ needs.prepare.outputs.enable_vulkan }}
+          - OpenGL: ${{ needs.prepare.outputs.enable_opengl }}
+          - OpenCV: ${{ needs.prepare.outputs.enable_opencv }}
+          - Audio: ${{ needs.prepare.outputs.enable_audio }}
+          - LLM: ${{ needs.prepare.outputs.enable_llm }}
+          - NNAPI: ${{ needs.prepare.outputs.enable_nnapi }}
+          EOF
+          
+          # 显示产物
+          echo "Final artifacts:"
+          find output -type f -name "*.so" -exec ls -lh {} \;
+
+      - name: Upload combined artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnn-android-all-${{ needs.prepare.outputs.build_type }}-${{ github.run_number }}
+          path: output/
+          retention-days: 30
