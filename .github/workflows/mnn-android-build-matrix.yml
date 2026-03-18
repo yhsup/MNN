@@ -58,13 +58,13 @@ on:
         default: false
         type: boolean
 
-  # push:
-    # branches:
-      # - main
-      # - master
-    # paths-ignore:
-      # - '**.md'
-      # - 'docs/**'
+  push:
+    branches:
+      - main
+      - master
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
 
 env:
   NDK_VERSION: 'r26d'
@@ -114,28 +114,11 @@ jobs:
             ARCHS="arm64-v8a,armeabi-v7a"
           fi
           
-          # 将架构列表转换为 JSON 数组格式
-          ARCHS_JSON=$(echo "$ARCHS" | tr ',' '\n' | jq -R -s -c 'split("\n") | map(select(length > 0))')
-          echo "archs_json=$ARCHS_JSON" >> $GITHUB_OUTPUT
-
-      - name: Set matrix
-        id: set-matrix
-        run: |
-          echo 'matrix={"include":[]}' > matrix.json
-          
-          # 读取架构列表
-          IFS=',' read -ra ARCHS <<< "${{ steps.set-params.outputs.archs_json || 'arm64-v8a,armeabi-v7a' }}"
-          
-          # 如果是从 workflow_dispatch 触发，使用输入的架构
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            ARCHS_INPUT="${{ inputs.architectures }}"
-            IFS=',' read -ra ARCHS <<< "$ARCHS_INPUT"
-          fi
-          
-          # 构建 JSON 矩阵
+          # 将架构列表转换为 JSON 矩阵格式
           MATRIX='{"include":['
           FIRST=true
-          for ARCH in "${ARCHS[@]}"; do
+          IFS=',' read -ra ARCH_ARRAY <<< "$ARCHS"
+          for ARCH in "${ARCH_ARRAY[@]}"; do
             ARCH=$(echo "$ARCH" | tr -d ' ')
             if [ -n "$ARCH" ]; then
               if [ "$FIRST" = true ]; then
@@ -174,78 +157,85 @@ jobs:
         with:
           ndk-version: ${{ env.NDK_VERSION }}
 
-      - name: Setup CMake
-        uses: lukka/get-cmake@latest
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build
-
       - name: Set environment
         run: |
           echo "ANDROID_NDK=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
 
-      - name: Generate MNN Schema
+      - name: Install dependencies
         run: |
-          if [ -f "./schema/generate.sh" ]; then
-            chmod +x ./schema/generate.sh
-            cd schema && ./generate.sh || true
-            cd ..
-          fi
+          sudo apt-get update
+          sudo apt-get install -y build-essential git zip
 
       - name: Build MNN for ${{ matrix.arch }}
         run: |
           ARCH="${{ matrix.arch }}"
           
-          # 设置 ABI
+          # 设置 ABI 和编译参数
           case $ARCH in
-            arm64-v8a) ABI="arm64-v8a" ;;
-            armeabi-v7a) ABI="armeabi-v7a" ;;
-            x86) ABI="x86" ;;
-            x86_64) ABI="x86_64" ;;
-            *) ABI="$ARCH" ;;
+            arm64-v8a)
+              ABI="arm64-v8a"
+              ARM82="ON"
+              ;;
+            armeabi-v7a)
+              ABI="armeabi-v7a"
+              ARM82="OFF"
+              ;;
+            x86)
+              ABI="x86"
+              ARM82="OFF"
+              ;;
+            x86_64)
+              ABI="x86_64"
+              ARM82="OFF"
+              ;;
+            *)
+              ABI="$ARCH"
+              ARM82="OFF"
+              ;;
           esac
           
-          echo "Building for $ABI..."
+          API_LEVEL="android-${{ needs.prepare.outputs.min_sdk_version }}"
+          echo "Building for $ABI, API Level: $API_LEVEL"
           
           mkdir -p build_${ABI}
           cd build_${ABI}
           
-          # 构建 CMake 参数
-          CMAKE_ARGS=(
-            -GNinja
-            -DCMAKE_BUILD_TYPE=${{ needs.prepare.outputs.build_type }}
-            -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake
-            -DANDROID_ABI=${ABI}
-            -DANDROID_PLATFORM=android-${{ needs.prepare.outputs.min_sdk_version }}
-            -DANDROID_STL=c++_shared
-            -DMNN_BUILD_SHARED_LIBS=ON
-            -DMNN_BUILD_FOR_ANDROID_COMMAND=ON
-            -DMNN_USE_LOGCAT=ON
-            -DMNN_JNI=ON
-            -DMNN_ARM82=ON
-            -DMNN_SEP_BUILD=OFF
-            -DMNN_BUILD_TRAIN=OFF
-            -DMNN_BUILD_DEMO=OFF
-            -DMNN_BUILD_TOOLS=OFF
-            -DMNN_BUILD_QUANTOOLS=OFF
-            -DMNN_EVALUATION=OFF
-            -DMNN_BUILD_CONVERTER=OFF
-            -DMNN_BUILD_TEST=OFF
-          )
+          # 构建额外参数
+          EXTRA_ARGS=""
+          [ "${{ needs.prepare.outputs.enable_opencl }}" == "true" ] && EXTRA_ARGS="$EXTRA_ARGS -DMNN_OPENCL=ON"
+          [ "${{ needs.prepare.outputs.enable_vulkan }}" == "true" ] && EXTRA_ARGS="$EXTRA_ARGS -DMNN_VULKAN=ON"
+          [ "${{ needs.prepare.outputs.enable_opengl }}" == "true" ] && EXTRA_ARGS="$EXTRA_ARGS -DMNN_OPENGL=ON"
+          [ "${{ needs.prepare.outputs.enable_opencv }}" == "true" ] && EXTRA_ARGS="$EXTRA_ARGS -DMNN_BUILD_OPENCV=ON -DMNN_IMGCODECS=ON"
+          [ "${{ needs.prepare.outputs.enable_audio }}" == "true" ] && EXTRA_ARGS="$EXTRA_ARGS -DMNN_BUILD_AUDIO=ON"
+          [ "${{ needs.prepare.outputs.enable_llm }}" == "true" ] && EXTRA_ARGS="$EXTRA_ARGS -DMNN_BUILD_LLM=ON -DMNN_LOW_MEMORY=ON -DMNN_SUPPORT_TRANSFORMER_FUSE=ON"
+          [ "${{ needs.prepare.outputs.enable_nnapi }}" == "true" ] && EXTRA_ARGS="$EXTRA_ARGS -DMNN_NNAPI=ON"
           
-          # 添加可选功能
-          [ "${{ needs.prepare.outputs.enable_opencl }}" == "true" ] && CMAKE_ARGS+=(-DMNN_OPENCL=ON)
-          [ "${{ needs.prepare.outputs.enable_vulkan }}" == "true" ] && CMAKE_ARGS+=(-DMNN_VULKAN=ON)
-          [ "${{ needs.prepare.outputs.enable_opengl }}" == "true" ] && CMAKE_ARGS+=(-DMNN_OPENGL=ON)
-          [ "${{ needs.prepare.outputs.enable_opencv }}" == "true" ] && CMAKE_ARGS+=(-DMNN_BUILD_OPENCV=ON -DMNN_IMGCODECS=ON)
-          [ "${{ needs.prepare.outputs.enable_audio }}" == "true" ] && CMAKE_ARGS+=(-DMNN_BUILD_AUDIO=ON)
-          [ "${{ needs.prepare.outputs.enable_llm }}" == "true" ] && CMAKE_ARGS+=(-DMNN_BUILD_LLM=ON -DMNN_LOW_MEMORY=ON)
-          [ "${{ needs.prepare.outputs.enable_nnapi }}" == "true" ] && CMAKE_ARGS+=(-DMNN_NNAPI=ON)
+          # 执行 CMake 配置 - 参考官方脚本
+          cmake ../ \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+            -DCMAKE_BUILD_TYPE=${{ needs.prepare.outputs.build_type }} \
+            -DANDROID_ABI="${ABI}" \
+            -DANDROID_STL=c++_static \
+            -DANDROID_NATIVE_API_LEVEL=${API_LEVEL} \
+            -DMNN_USE_LOGCAT=false \
+            -DMNN_USE_SSE=OFF \
+            -DMNN_BUILD_TEST=OFF \
+            -DMNN_BUILD_BENCHMARK=OFF \
+            -DMNN_ARM82=${ARM82} \
+            -DMNN_BUILD_FOR_ANDROID_COMMAND=true \
+            -DMNN_BUILD_SHARED_LIBS=ON \
+            -DMNN_BUILD_TRAIN=OFF \
+            -DMNN_BUILD_DEMO=OFF \
+            -DMNN_BUILD_TOOLS=OFF \
+            -DMNN_BUILD_QUANTOOLS=OFF \
+            -DMNN_EVALUATION=OFF \
+            -DMNN_BUILD_CONVERTER=OFF \
+            -DNATIVE_LIBRARY_OUTPUT=. \
+            -DNATIVE_INCLUDE_OUTPUT=. \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            ${EXTRA_ARGS}
           
-          cmake .. "${CMAKE_ARGS[@]}"
-          cmake --build . -j$(nproc)
+          make -j$(nproc)
           
           # 收集产物
           mkdir -p ../artifacts/${ABI}
@@ -284,22 +274,20 @@ jobs:
           # 合并所有架构的 so 文件
           for dir in all_artifacts/mnn-*/; do
             if [ -d "$dir" ]; then
-              ARCH=$(basename "$dir" | sed 's/mnn-//')
-              if [ -d "${dir}${ARCH}" ]; then
-                cp -rv "${dir}${ARCH}" output/libs/ 2>/dev/null || true
-              else
-                mkdir -p "output/libs/${ARCH}"
-                cp -rv ${dir}*.so "output/libs/${ARCH}/" 2>/dev/null || true
+              # 查找 ABI 目录
+              for ABI_DIR in "$dir"arm64-v8a "$dir"armeabi-v7a "$dir"x86 "$dir"x86_64; do
+                if [ -d "$ABI_DIR" ]; then
+                  ABI=$(basename "$ABI_DIR")
+                  mkdir -p "output/libs/${ABI}"
+                  cp -rv "$ABI_DIR"/*.so "output/libs/${ABI}/" 2>/dev/null || true
+                fi
+              done
+              
+              # 复制头文件
+              if [ -d "${dir}include" ]; then
+                mkdir -p output/include
+                cp -rv ${dir}include/* output/include/ 2>/dev/null || true
               fi
-            fi
-          done
-          
-          # 复制头文件
-          for dir in all_artifacts/mnn-*/; do
-            if [ -d "${dir}include" ]; then
-              mkdir -p output/include
-              cp -rv ${dir}include/* output/include/ 2>/dev/null || true
-              break
             fi
           done
           
