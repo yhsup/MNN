@@ -1,261 +1,154 @@
-name: Build MNN Android Demo APK
+name: MNN Android Build & APK Release
+# 触发规则：push到主分支、PR到主分支、支持手动触发
 on:
   push:
     branches: [ master, main ]
+    paths:
+      - 'source/**'
+      - 'express/**'
+      - 'include/**'
+      - 'project/android/**'
+      - '3rd_party/**'
+      - '.github/workflows/android-mnn-build-apk.yml'
   pull_request:
     branches: [ master, main ]
-  workflow_dispatch:
-    inputs:
-      build_type:
-        description: '构建类型'
-        required: false
-        default: 'Release'
-        type: choice
-        options:
-          - Release
-          - Debug
-      min_sdk_version:
-        description: '最低 SDK 版本'
-        required: false
-        default: '21'
-        type: string
-      enable_opencl:
-        description: '启用 OpenCL GPU 加速'
-        required: false
-        default: true
-        type: boolean
-      enable_vulkan:
-        description: '启用 Vulkan 后端'
-        required: false
-        default: true
-        type: boolean
-      enable_opengl:
-        description: '启用 OpenGL 后端'
-        required: false
-        default: true
-        type: boolean
-      enable_opencv:
-        description: '启用 OpenCV 图像处理'
-        required: false
-        default: true
-        type: boolean
-      enable_audio:
-        description: '启用 Audio 音频处理'
-        required: false
-        default: true
-        type: boolean
-      enable_llm:
-        description: '启用 LLM 大模型支持'
-        required: false
-        default: true
-        type: boolean
-      enable_nnapi:
-        description: '启用 NNAPI 后端'
-        required: false
-        default: false
-        type: boolean
-      build_arm64:
-        description: '编译 arm64-v8a 架构'
-        required: false
-        default: true
-        type: boolean
-      build_arm32:
-        description: '编译 armeabi-v7a 架构'
-        required: false
-        default: true
-        type: boolean
-      build_x86:
-        description: '编译 x86 架构'
-        required: false
-        default: false
-        type: boolean
-      build_x86_64:
-        description: '编译 x86_64 架构'
-        required: false
-        default: false
-        type: boolean
-      apk_abi_type:
-        description: 'APK 架构打包类型'
-        required: false
-        default: 'universal'
-        type: choice
-        options:
-          - universal
-          - 64bit
-          - 32bit
-          - x86_64
-          - x86
+    paths:
+      - 'source/**'
+      - 'express/**'
+      - 'include/**'
+      - 'project/android/**'
+      - '3rd_party/**'
+      - '.github/workflows/android-mnn-build-apk.yml'
+  workflow_dispatch: # 支持手动触发运行
+
+# 并发控制：同一分支仅保留一个运行中的任务，避免资源浪费
+concurrency:
+  group: android-mnn-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  build-mnn-apk:
+  build-mnn-android:
     runs-on: ubuntu-latest
     steps:
-      - name: 检出 MNN 完整源码（含子模块）
+      # 1. 检出代码（含子模块依赖）
+      - name: Checkout MNN Source Code
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: recursive # 拉取3rd_party等子模块依赖，避免编译缺失
           fetch-depth: 1
 
-      - name: 配置 JDK 17 环境
+      # 2. 安装编译依赖环境
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake make gcc g++ ninja-build zip unzip
+
+      # 3. 编译arm64-v8a 64位so库（完全复用官方workflow的编译参数）
+      - name: Build MNN Android arm64-v8a Libraries
+        run: |
+          cd project/android
+          mkdir -p build_64
+          cd build_64
+          ../build_64.sh \
+            -DMNN_LOW_MEMORY=true \
+            -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true \
+            -DMNN_BUILD_LLM=true \
+            -DMNN_SUPPORT_TRANSFORMER_FUSE=true \
+            -DLLM_SUPPORT_VISION=true \
+            -DMNN_BUILD_OPENCV=true \
+            -DMNN_IMGCODECS=true \
+            -DLLM_SUPPORT_AUDIO=true \
+            -DMNN_BUILD_AUDIO=true \
+            -DMNN_SUPPORT_BF16=ON
+
+      # 4. 编译armeabi-v7a 32位so库（完全复用官方workflow的编译参数）
+      - name: Build MNN Android armeabi-v7a Libraries
+        run: |
+          cd project/android
+          mkdir -p build_32
+          cd build_32
+          ../build_32.sh \
+            -DMNN_LOW_MEMORY=true \
+            -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true \
+            -DMNN_BUILD_LLM=true \
+            -DMNN_SUPPORT_TRANSFORMER_FUSE=true \
+            -DLLM_SUPPORT_AUDIO=true \
+            -DMNN_BUILD_AUDIO=true \
+            -DLLM_SUPPORT_VISION=true \
+            -DMNN_BUILD_OPENCV=true \
+            -DMNN_IMGCODECS=true
+
+      # 5. 整理编译好的so库，标准化Android jniLibs目录结构
+      - name: Collect Compiled MNN Libraries
+        run: |
+          # 创建输出目录
+          mkdir -p mnn_android_libs/arm64-v8a
+          mkdir -p mnn_android_libs/armeabi-v7a
+          
+          # 复制全量so库（适配所有开启的编译功能）
+          cp project/android/build_64/lib*.so mnn_android_libs/arm64-v8a/
+          cp project/android/build_32/lib*.so mnn_android_libs/armeabi-v7a/
+          
+          # 打印编译结果，方便排查问题
+          echo "===== arm64-v8a 编译完成的库 ====="
+          ls -lh mnn_android_libs/arm64-v8a/
+          echo "===== armeabi-v7a 编译完成的库 ====="
+          ls -lh mnn_android_libs/armeabi-v7a/
+
+      # 6. 配置APK构建环境：JDK + Android SDK + NDK
+      - name: Set Up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
           java-version: '17'
+          distribution: 'temurin'
+          cache: gradle # 开启gradle缓存，加速后续构建
 
-      - name: 配置 Android SDK & NDK 编译环境
+      - name: Set Up Android SDK & NDK
         uses: android-actions/setup-android@v3
         with:
-          packages: |
-            build-tools;34.0.0
-            platforms;android-34
-            ndk;25.2.9519653
-          accept-android-sdk-licenses: true
+          api-level: 34
+          build-tools: '34.0.0'
+          ndk: '25.2.9519653' # 与MNN官方兼容的稳定NDK版本
 
-      - name: 全局环境变量初始化
+      # 7. 将编译好的so库复制到Demo项目的jniLibs目录，供APK构建使用
+      - name: Copy Libraries to Demo Project
         run: |
-          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653" >> $GITHUB_ENV
-          echo "CMAKE_BUILD_TYPE=${{ inputs.build_type }}" >> $GITHUB_ENV
-          echo "MIN_SDK_VERSION=${{ inputs.min_sdk_version }}" >> $GITHUB_ENV
-
-      - name: 生成 MNN 编译 CMake 参数
-        id: cmake-args
-        run: |
-          # 基础编译参数
-          CMAKE_ARGS="-DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
-          CMAKE_ARGS="$CMAKE_ARGS -DANDROID_PLATFORM=android-$MIN_SDK_VERSION"
-          CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE"
-          CMAKE_ARGS="$CMAKE_ARGS -DMNN_BUILD_FOR_ANDROID=ON"
-          CMAKE_ARGS="$CMAKE_ARGS -DMNN_BUILD_SHARED_LIBS=ON"
+          DEMO_JNI_LIBS_PATH=project/android/demo/app/src/main/jniLibs
+          # 创建jniLibs目录
+          mkdir -p $DEMO_JNI_LIBS_PATH/arm64-v8a
+          mkdir -p $DEMO_JNI_LIBS_PATH/armeabi-v7a
+          # 复制so库
+          cp -r mnn_android_libs/arm64-v8a/* $DEMO_JNI_LIBS_PATH/arm64-v8a/
+          cp -r mnn_android_libs/armeabi-v7a/* $DEMO_JNI_LIBS_PATH/armeabi-v7a/
           
-          # 功能模块开关映射
-          CMAKE_ARGS="$CMAKE_ARGS -DMNN_OPENCL_ENABLE=${{ inputs.enable_opencl && 'ON' || 'OFF' }}"
-          CMAKE_ARGS="$CMAKE_ARGS -DMNN_VULKAN_ENABLE=${{ inputs.enable_vulkan && 'ON' || 'OFF' }}"
-          CMAKE_ARGS="$CMAKE_ARGS -DMNN_OPENGL_ENABLE=${{ inputs.enable_opengl && 'ON' || 'OFF' }}"
-          CMAKE_ARGS="$CMAKE_ARGS -DMNN_OPENCV_ENABLE=${{ inputs.enable_opencv && 'ON' || 'OFF' }}"
-          CMAKE_ARGS="$CMAKE_ARGS -DMNN_AUDIO_ENABLE=${{ inputs.enable_audio && 'ON' || 'OFF' }}"
-          CMAKE_ARGS="$CMAKE_ARGS -DMNN_LLM_ENABLE=${{ inputs.enable_llm && 'ON' || 'OFF' }}"
-          CMAKE_ARGS="$CMAKE_ARGS -DMNN_NNAPI_ENABLE=${{ inputs.enable_nnapi && 'ON' || 'OFF' }}"
+          echo "===== Demo项目已注入的库 ====="
+          ls -lh $DEMO_JNI_LIBS_PATH/*/
+
+      # 8. 构建Demo APK（默认Debug版本，无需签名即可直接安装）
+      - name: Build MNN Demo APK
+        run: |
+          cd project/android/demo
+          chmod +x gradlew
+          ./gradlew clean assembleDebug
           
-          echo "cmake_args=$CMAKE_ARGS" >> $GITHUB_OUTPUT
+          echo "===== APK构建完成 ====="
+          ls -lh app/build/outputs/apk/debug/
 
-      - name: 编译 arm64-v8a 架构 SO 库
-        if: inputs.build_arm64 == true
-        run: |
-          mkdir -p build/arm64-v8a && cd build/arm64-v8a
-          cmake ${{ steps.cmake-args.outputs.cmake_args }} \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_STL=c++_static \
-            ../..
-          make -j$(nproc)
-          # 复制 SO 到 Demo 对应目录
-          mkdir -p ../../project/android/demo/app/src/main/jniLibs/arm64-v8a
-          cp libMNN.so ../../project/android/demo/app/src/main/jniLibs/arm64-v8a/
-          cp libMNN_*.so ../../project/android/demo/app/src/main/jniLibs/arm64-v8a/ 2>/dev/null || true
-
-      - name: 编译 armeabi-v7a 架构 SO 库
-        if: inputs.build_arm32 == true
-        run: |
-          mkdir -p build/armeabi-v7a && cd build/armeabi-v7a
-          cmake ${{ steps.cmake-args.outputs.cmake_args }} \
-            -DANDROID_ABI=armeabi-v7a \
-            -DANDROID_STL=c++_static \
-            -DANDROID_ARM_NEON=ON \
-            ../..
-          make -j$(nproc)
-          # 复制 SO 到 Demo 对应目录
-          mkdir -p ../../project/android/demo/app/src/main/jniLibs/armeabi-v7a
-          cp libMNN.so ../../project/android/demo/app/src/main/jniLibs/armeabi-v7a/
-          cp libMNN_*.so ../../project/android/demo/app/src/main/jniLibs/armeabi-v7a/ 2>/dev/null || true
-
-      - name: 编译 x86 架构 SO 库
-        if: inputs.build_x86 == true
-        run: |
-          mkdir -p build/x86 && cd build/x86
-          cmake ${{ steps.cmake-args.outputs.cmake_args }} \
-            -DANDROID_ABI=x86 \
-            -DANDROID_STL=c++_static \
-            ../..
-          make -j$(nproc)
-          # 复制 SO 到 Demo 对应目录
-          mkdir -p ../../project/android/demo/app/src/main/jniLibs/x86
-          cp libMNN.so ../../project/android/demo/app/src/main/jniLibs/x86/
-          cp libMNN_*.so ../../project/android/demo/app/src/main/jniLibs/x86/ 2>/dev/null || true
-
-      - name: 编译 x86_64 架构 SO 库
-        if: inputs.build_x86_64 == true
-        run: |
-          mkdir -p build/x86_64 && cd build/x86_64
-          cmake ${{ steps.cmake-args.outputs.cmake_args }} \
-            -DANDROID_ABI=x86_64 \
-            -DANDROID_STL=c++_static \
-            ../..
-          make -j$(nproc)
-          # 复制 SO 到 Demo 对应目录
-          mkdir -p ../../project/android/demo/app/src/main/jniLibs/x86_64
-          cp libMNN.so ../../project/android/demo/app/src/main/jniLibs/x86_64/
-          cp libMNN_*.so ../../project/android/demo/app/src/main/jniLibs/x86_64/ 2>/dev/null || true
-
-      - name: 修复 Android 12+ Manifest 导出属性报错
-        working-directory: project/android/demo
-        run: |
-          # 给主入口 Activity（带 LAUNCHER 过滤器）设置 exported=true
-          sed -i '/<activity android:name=".MainActivity"/a \            android:exported="true"' app/src/main/AndroidManifest.xml
-          # 给报错的 VideoActivity 显式设置 exported=false
-          sed -i '/<activity android:name=".VideoActivity"/a \            android:exported="false"' app/src/main/AndroidManifest.xml
-          # 兜底：给所有带 intent-filter 的 Activity 补充 exported 属性，彻底避免合并报错
-          sed -i '/<activity.*>/!b;n;/<intent-filter>/!b;x;/exported/!{x;s/^\s*<activity/& android:exported="false"/;b};x' app/src/main/AndroidManifest.xml
-
-      - name: 生成本地编译配置 local.properties
-        working-directory: project/android/demo
-        run: |
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
-
-      - name: 配置 APK 架构过滤规则
-        id: abi-filter
-        working-directory: project/android/demo
-        run: |
-          # 根据输入参数生成对应 ABI 过滤规则
-          case "${{ inputs.apk_abi_type }}" in
-            "64bit")
-              ABI_FILTER="arm64-v8a"
-              ;;
-            "32bit")
-              ABI_FILTER="armeabi-v7a"
-              ;;
-            "x86_64")
-              ABI_FILTER="x86_64"
-              ;;
-            "x86")
-              ABI_FILTER="x86"
-              ;;
-            "universal")
-              # 通用版打包所有已开启编译的架构
-              ABI_LIST=""
-              [ "${{ inputs.build_arm64 }}" == "true" ] && ABI_LIST="$ABI_LIST 'arm64-v8a',"
-              [ "${{ inputs.build_arm32 }}" == "true" ] && ABI_LIST="$ABI_LIST 'armeabi-v7a',"
-              [ "${{ inputs.build_x86 }}" == "true" ] && ABI_LIST="$ABI_LIST 'x86',"
-              [ "${{ inputs.build_x86_64 }}" == "true" ] && ABI_LIST="$ABI_LIST 'x86_64',"
-              ABI_FILTER=${ABI_LIST%,}
-              ;;
-          esac
-          
-          # 写入 build.gradle 配置
-          sed -i "/ndk {/a \            abiFilters $ABI_FILTER" app/build.gradle
-          echo "abi_filter=$ABI_FILTER" >> $GITHUB_OUTPUT
-
-      - name: 赋予 gradlew 执行权限
-        working-directory: project/android/demo
-        run: chmod +x gradlew
-
-      - name: 执行 APK 构建
-        working-directory: project/android/demo
-        run: ./gradlew assemble${{ inputs.build_type }} --stacktrace
-
-      - name: 上传构建产物 APK
+      # 9. 上传编译好的MNN so库（可下载复用）
+      - name: Upload MNN Android Libraries
         uses: actions/upload-artifact@v4
         with:
-          name: MNN-Demo-${{ inputs.build_type }}-${{ inputs.apk_abi_type }}
-          path: project/android/demo/app/build/outputs/apk/${{ inputs.build_type }}/*.apk
+          name: mnn-android-libs-all-arch
+          path: mnn_android_libs/
+          retention-days: 30 # 保留30天，可自行调整（免费版最长90天）
+
+      # 10. 上传构建好的Demo APK
+      - name: Upload MNN Demo Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnn-demo-android-apk
+          path: project/android/demo/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
